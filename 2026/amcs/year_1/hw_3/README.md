@@ -1,84 +1,137 @@
-# ДЗ по Docker
+# HW 3: Docker
 
-Упакуйте готовое веб-приложение со счётчиком в Docker. Код приложения менять запрещено.
+## Как запустить
 
-## Исходники
+Создать `.env` из примера:
+```bash
+cp .env.example .env
+```
 
-В [app](./app) — код приложения, описание его зависимостей и описание работы. Изучите это перед выполнением ДЗ. Репозиторий шаблон доступен по [ссылке](https://github.com/null-ref-exc/hw_3_template/tree/main)
+Поднять приложение с Redis (уровни 8-10):
+```bash
+docker compose up -d
+```
 
-## Оценивание
+Приложение будет доступно на `http://127.0.0.1:8080/` (порт и приветствие меняются в `.env`).
+Остановить: `docker compose down`.
 
-Максимум — **10 баллов**
+Для 6-го уровня (SQLite) используется `compose.sqlite.yaml`:
+```bash
+docker compose -f compose.sqlite.yaml up -d
+```
 
-Пункты выполняются **строго** последовательно
+## Про compose и безопасность (уровни 6-10)
 
-## 4 балла — один контейнер
+* В `compose.sqlite.yaml` данные хранятся в volume `counter_data`.
+* В `compose.yaml` поднимается два сервиса: `app` и `redis`. У приложения переменные `STORAGE=redis` и `REDIS_URL=redis://redis:6379/0`. У Redis включен `appendonly yes` и volume `redis_data`. Порт наружу отдается только у `app`.
+* Для обоих сервисов в `compose.yaml` прописаны healthcheck'и.
+* В 10-м уровне для `app` сделано: `user: "1000:1000"`, `read_only: true`, `tmpfs: /tmp`, лимиты 256m и 1 CPU.
 
-Напишите Dockerfile, соберите образ и запустите приложение. Опубликуйте порт, передайте приветствие через переменную окружения, проверьте увеличение счётчика и посмотрите логи. Приложите логи в качестве ответа.
+## Отчет по проверкам
 
-## 6 баллов — Compose и данные
+### Уровень 4. Один контейнер
+```bash
+docker build -t counter-app .
+docker run -d --name counter -p 8080:8000 -e GREETING="Привет!" counter-app
+```
 
-Настройте запуск через Docker Compose. Сделайте приветствие и порт, на котором приложение доступно в системе, настраиваемыми, добавьте `.env.example`. Подключите именованный volume и покажите, что счётчик сохраняется после удаления и повторного создания контейнера.
+Логи (docker logs counter):
+```text
+2026-11-24 20:24:29,973 listening port=8000 storage=sqlite
+2026-11-24 20:25:04,912 http 172.17.0.1 "GET / HTTP/1.1" 200 -
+```
 
-## 8 баллов — отдельное хранилище
+### Уровень 6. SQLite и volume
+Запуск и проверка:
+```bash
+docker compose -f compose.sqlite.yaml up -d
+curl http://127.0.0.1:8080/
+```
+Вывод:
+```json
+{"greeting": "Hello, Docker!", "count": 2, "hostname": "ca14da53baa9", "storage": "sqlite"}
+```
 
-В `compose.yaml` должны работать два сервиса: `app` и `redis`.
+Удаляем и поднимаем заново (данные сохранились):
+```bash
+docker compose -f compose.sqlite.yaml down
+docker compose -f compose.sqlite.yaml up -d
+curl http://127.0.0.1:8080/
+```
+Вывод:
+```json
+{"greeting": "Hello, Docker!", "count": 2, "hostname": "664ecd17b9cf", "storage": "sqlite"}
+```
 
-1. **Подключение.** Для приложения задайте `STORAGE=redis` и `REDIS_URL=redis://redis:6379/0`. Используйте имя сервиса `redis`, а не `localhost` или IP контейнера. На компьютере публикуется только порт приложения.
-2. **Данные.** Подключите именованный volume к `/data` сервиса Redis и включите запись данных на диск.
-3. **Готовность.** Добавьте healthcheck обоих сервисов.
+### Уровень 8. Redis и отказоустойчивость
+Проверка сохранения после down/up:
+```bash
+docker compose up -d
+curl -X POST http://127.0.0.1:8080/increment
+docker compose down
+docker compose up -d
+curl http://127.0.0.1:8080/
+```
+Вывод:
+```json
+{"greeting": "Hello, Docker!", "count": 1, "hostname": "cfeb529c02fa", "storage": "redis"}
+```
 
-### Что проверить
+Имитация падения Redis:
+```bash
+docker compose stop redis
+curl -i http://127.0.0.1:8080/healthz
+curl -i http://127.0.0.1:8080/readyz
+curl -i -X POST http://127.0.0.1:8080/increment
+```
+Вывод (200, 503, 503):
+```text
+HTTP/1.0 200 OK
+{"status": "alive"}
 
-- Выполните несколько `POST /increment`, запишите значение `N`. После `docker compose down` и повторного `up -d` запрос `GET /` должен вернуть тот же `N`. Не используйте `down -v` в этом эксперименте: он удаляет данные.
-- Выполните `docker compose stop redis`. Приложение продолжает работать: `GET /healthz` возвращает **200**, а `GET /readyz` и `POST /increment` — **503**.
-- Выполните `docker compose start redis`, дождитесь готовности. Без ручного перезапуска приложения `GET /` снова возвращает `N`, следующий POST — `N + 1`.
+HTTP/1.0 503 Service Unavailable
+{"error": "storage_unavailable"}
 
-В отчёт добавьте команды и результаты этих проверок.
+HTTP/1.0 503 Service Unavailable
+{"error": "storage_unavailable"}
+```
 
-[ Как проверить готовность сервиса](https://docs.docker.com/compose/how-tos/startup-order/)
+Запускаем Redis обратно, приложение само восстанавливается:
+```bash
+docker compose start redis
+curl http://127.0.0.1:8080/
+curl -X POST http://127.0.0.1:8080/increment
+```
+Вывод:
+```json
+{"greeting": "Hello, Docker!", "count": 1, "hostname": "86e50d3a795a", "storage": "redis"}
+{"greeting": "Hello, Docker!", "count": 2, "hostname": "86e50d3a795a", "storage": "redis"}
+```
 
-## 10 баллов — проверка восстановления
+### Уровень 10. Автотесты
+Скрипт `scripts/check.sh` запускался два раза подряд.
 
-К уровню 8 нужно добавить ограничения процесса и автоматическую проверку восстановления.
+Первый запуск:
+```text
+[1] Start project
+[2] Check initial count
+[3] Increment x3
+[4] Recreate app
+[5] Stop redis
+[6] Start redis
+[7] Backup
+Status: Downloaded newer image for alpine:latest
+[DONE] All tests passed!
+```
 
-### Ограничения приложения
-
-- Процесс `app` работает с **UID, отличным от 0**
-- Корневая файловая система `app` доступна только для чтения
-- У `app` заданы лимиты: не больше **256 MiB RAM** и **1 ядра CPU**
-
-### Автоматический сценарий
-
-Добавьте `scripts/check.sh` или `scripts/check.py`, запускаемый командой  `./scripts/check.sh` или `python scripts/check.py`. Скрипт без ручных действий:
-
-1. Создаёт отдельный тестовый Compose-проект с пустым хранилищем и дожидается готовности
-2. Проверяет исходный счётчик **0**, выполняет `N` запросов `POST /increment` и проверяет результат **N**
-3. Пересоздаёт только контейнер приложения и проверяет, что счётчик сохранился
-4. Проверяет отключение и повторный запуск Redis по сценарию уровня 8
-5. Создаёт согласованную резервную копию во внешний файл. Допустимо штатно остановить приложение и Redis, затем скопировать весь каталог данных Redis с сохранением структуры и прав
-6. Удаляет исходный тестовый проект **вместе с volumes** через `down -v`
-
-### Требования к скрипту
-
-- У запросов и ожидания готовности должны быть тайм-ауты
-- При ошибке скрипт сообщает этап и возвращает ненулевой код
-- Через `trap` он очищает только свои тестовые ресурсы; фиксированные `container_name` и общий volume между проектами использовать нельзя
-
-На компьютере проверяющего требуются только Docker с Compose и curl; дополнительные инструменты можно запускать в контейнерах. Подтвердите **два успешных запуска подряд**, приложив вывод в отчёт.
-
-[Справка о резервном копировании volumes](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)
-
-## Как сдавать?
-
-Создайте свой репозиторий и выполните всю работу в нем. Если репозиторий приватный - добавьте преподавателей. После сдайте ссылку на него в [гугл-форму](https://forms.gle/GGvhkaSxikbJi44t9). Не забудьте добавить туда
-
-- Исходники
-- Dockerfile
-- `.dockerignore`
-- README с командами запуска и настройками Compose для уровней от 6 баллов
-- Любые файлы который вы считаете нужным
-
-Добавьте короткий отчёт о проверках; для 10 баллов — скрипт проверки.
-Достаточно сделать один финальный коммит после выполнения задания на желаемый балл.
-
+Второй запуск:
+```text
+[1] Start project
+[2] Check initial count
+[3] Increment x3
+[4] Recreate app
+[5] Stop redis
+[6] Start redis
+[7] Backup
+[DONE] All tests passed!
+```
